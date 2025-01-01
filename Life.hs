@@ -1,78 +1,93 @@
+{-# language TypeFamilies #-}
 module Life where
-
+import Data.List
 import Control.Comonad
+import Data.Distributive
+import Data.Functor.Compose
+import Data.Functor.Foldable
+
+-- Infinite stream
+data Stream a = (:>) { headS :: a
+                     , tailS :: Stream a}
+  deriving Functor
+
+infixr 5 :>
+
+-- Stream is both a recursive and a corecursive data structure
+-- We can fold and unfold it using cata and ana
+
+data Pair a x = P a x
+  deriving Functor
+
+type instance Base (Stream a) = Pair a
+
+instance Recursive (Stream a) where
+    project (a :> as) = P a as
+
+instance Corecursive (Stream a) where
+    embed (P a as) = a :> as
+
+-- Stream is distributive over any functor
+instance Distributive Stream where
+    distribute :: Functor f => f (Stream a) -> Stream (f a)
+    distribute stms = (headS <$> stms) :> distribute (tailS <$> stms)
+
+instance Show a => Show (Stream a) where
+  show = unwords . fmap show . take 6 . toInfList
+
+repeatS :: a -> Stream a
+repeatS = ana (\a -> P a a)
+
+iterateS :: (a -> a) -> a -> Stream a
+iterateS f = ana (\a -> P a (f a))
+
+-- The first argument is the padding
+fromListS :: a -> [a] -> Stream a
+fromListS z = ana go
+  where go [] = P z []
+        go (a : as) = P a as
+
+toInfList :: Stream a -> [a]
+toInfList = cata (\(P a as) -> a : as)
+
 
 -- Bidirectional infinite stream
-
-data BiDi a = BiDi [a] [a]
+-- Contains a backward and a forward stream
+data Cursor a = Cur { bwStm :: Stream a
+                    , fwStm :: Stream a }
   deriving Functor
 
-shiftBck, shiftFwd :: BiDi a -> BiDi a
-shiftBck (BiDi (x:xs) ys) = BiDi xs (x:ys)
-shiftFwd (BiDi xs (y:ys)) = BiDi (y:xs) ys
+instance Distributive Cursor where
+    distribute :: Functor f => f (Cursor a) -> Cursor (f a)
+    distribute fCur = Cur (distribute (bwStm <$> fCur)) 
+                          (distribute (fwStm <$> fCur))
 
-getBD :: BiDi a -> a
-getBD (BiDi _ (y:_)) = y
+instance Comonad Cursor where
+  extract (Cur _ (a :> _)) = a
+  duplicate bi = Cur (iterateS moveBwd (moveBwd bi)) 
+                     (iterateS moveFwd bi)
 
-setBD :: a -> BiDi a -> BiDi a
-setBD a (BiDi xs (_:ys)) = BiDi xs (a:ys)
+instance Show a => Show (Cursor a) where
+  show (Cur _ fw) = show fw ++ "\n"
 
-constStream :: a -> BiDi a
-constStream a = BiDi (repeat a) (repeat a)
+moveFwd :: Cursor a -> Cursor a
+moveFwd (Cur bw (a :> as)) = Cur (a :> bw) as
 
--- unfold using two generators and two seeds
-unfoldBD :: (s -> (s, a)) -> s ->
-            (s -> (s, a)) -> s -> BiDi a
-unfoldBD g s g' s' = BiDi l r
-  where l = unfoldLst g  s
-        r = unfoldLst g' s'
+moveBwd :: Cursor a -> Cursor a
+moveBwd (Cur (a :> as) fw) = Cur as (a :> fw)
 
--- unfold an infinite list
-unfoldLst :: (s -> (s, a)) -> s -> [a]
-unfoldLst g z =
-  let (z', a) = g z
-  in a : unfoldLst g z'
+repeatCur :: a -> Cursor a
+repeatCur a = Cur (repeatS a) (repeatS a)
 
--- Infinite grid
+listToCur :: a -> [a] -> Cursor a
+listToCur z as = Cur (repeatS z) (fromListS z as)
 
-newtype Grid a = Grid (BiDi (BiDi a))
-  deriving Functor
+get2 :: Cursor a -> [a]
+get2 bidi = [extract (moveBwd bidi), extract (moveFwd bidi)]
 
-set :: a -> Grid a -> Grid a
-set a (Grid g) = Grid $ setBD newRow g
-  where newRow = setBD a $ getBD g
+get3 :: Cursor a -> [a]
+get3 bidi = [extract (moveBwd bidi), extract bidi, extract (moveFwd bidi)]
 
--- Shifting the Grid
-
-data Up = Up
-data Dn = Dn
-data Lf = Lf
-data Rt = Rt
-
-class Shift dir where
-  mv :: dir -> Grid a -> Grid a
-
-instance Shift Up where
-  mv dir (Grid g) = Grid $ shiftFwd g
-instance Shift Dn where
-  mv dir (Grid g) = Grid $ shiftBck g
-instance Shift Lf where
-  mv dir (Grid g) = Grid $ fmap shiftFwd g
-instance Shift Rt where
-  mv dir (Grid g) = Grid $ fmap shiftBck g
-
-shiftN :: Shift dir => dir -> Int -> Grid a -> Grid a
-shiftN dir n g = iterate (mv dir) g !! n
-
--- Comonad
-
-instance Comonad Grid where
-  extract (Grid g) = getBD (getBD g)
-  duplicate g = Grid $ unfoldBD (rowsGen Dn) (mv Dn g)
-                                (rowsGen Up) g
-    where rowsGen dir g = (mv dir g, unfoldLn g)
-          unfoldLn g = unfoldBD (listGen Rt) (mv Rt g) (listGen Lf) g
-          listGen dir g = (mv dir g, g)
 
 data State = Empty | Full
   deriving Enum
@@ -81,69 +96,52 @@ instance Show State where
   show Empty = "."
   show Full  = "o"
 
--- Counting neighbors
+-- 2-dimensional infinite grid
+-- A bidirectional stream of bidirectional streams
 
-get3, get2, get1 :: Grid a -> [a]
-get3 g = [extract (mv Rt g), extract g, extract (mv Lf g)]
-get2 g = [extract (mv Rt g), extract (mv Lf g)]
-get1 g = [extract g]
+type Grid a = Compose Cursor Cursor a
 
-neighbors :: Grid a -> [a]
-neighbors g = get3 (mv Up g) ++ get2 g ++ get3 (mv Dn g)
+instance (Comonad w, Distributive w) => Comonad (Compose w w) where
+    extract = extract . extract . getCompose
+    duplicate = fmap Compose . Compose .
+                fmap distribute . duplicate . fmap duplicate .
+                getCompose
+
+instance {-# OVERLAPPING #-} Show a => Show (Grid a) where
+  show = show . getCompose
+
+matrixToGrid :: a -> [[a]] -> Grid a
+matrixToGrid z = Compose . listToCur (repeatCur z) . fmap (listToCur z)
+
+get8neighbors :: Grid a -> [a]
+get8neighbors (Compose grid) =
+  get3 (extract $ moveBwd grid) ++
+  get2 (extract grid) ++
+  get3 (extract $ moveFwd grid)
 
 countNeighbors :: Grid State -> Int
-countNeighbors = sum . fmap fromEnum . neighbors
-
-emptyGrid :: Grid State
-emptyGrid = Grid (constStream (constStream Empty))
+countNeighbors = sum . fmap fromEnum . get8neighbors
 
 -- Calculate next state at the current location in the Grid
 
 nextState :: Grid State -> State
-nextState grid =
-  let cnt = countNeighbors grid
-  in if cnt == 3 then Full
-     else if cnt == 2 then extract grid
-          else Empty
+nextState grid
+  | cnt == 3 = Full
+  | cnt == 2 = extract grid
+  | otherwise = Empty
+  where
+      cnt = countNeighbors grid
 
+generations :: Grid State -> [Grid State]
+generations = iterate $ extend nextState
 
-instance Show a => Show (BiDi a) where
-  show (BiDi (x1: x2: x3: xs) (y1: y2 : y3 : y4: ys)) =
-     show x3 ++ " " ++ show x2 ++ " " ++ show x1 ++ " " ++
-     show y1 ++ " " ++ show y2 ++ " " ++ show y3 ++ " " ++ show y4 ++ "\n"
+parseChar :: Char -> State
+parseChar '.' = Empty
+parseChar 'o' = Full
+parseChar _ = error "Invalid grid input"
 
-instance Show a => Show (Grid a) where
-  show (Grid bd) = show bd
-
--- From strings to Grid
-
-getGrid :: [String] -> Grid State
-getGrid rows =
-  let grid = parse rows emptyGrid
-      h = length rows
-      w = if h > 0 then length (head rows) else 0
-  in  shiftN Dn (h `div` 2) $ shiftN Lf w grid
-
-parse :: [String] -> Grid State -> Grid State
-parse ls g = foldl (\ g l -> mv Up (parseLn l g)) g ls
-
-parseLn :: String -> Grid State -> Grid State
-parseLn s g =
-    let (g', n) = go s (g, 0)
-    in shiftN Rt n g'
-  where go :: String -> (Grid State, Int) -> (Grid State, Int)
-        go [] (g, n) = (g, n)
-        go (c:cs) (g, n) =
-          let g' = if c == '.' then g else set Full g
-          in go cs (mv Lf g', n + 1)
-
-
-lives :: Grid State -> [Grid State]
-lives = iterate $ extend nextState
-
-testLife = do
-  let grid = getGrid [".o.", "..o", "ooo", "...", "..."]
-  print $ take 9 (lives grid)
-
+main :: IO ()
 main = do
-  testLife
+  let matrix = fmap (fmap parseChar) [".o.", "..o", "ooo", "...", "..."]
+      grid = matrixToGrid Empty matrix
+  print $ take 9 (generations grid)
