@@ -101,7 +101,7 @@ instance Show State where
 
 type Grid a = Compose Cursor Cursor a
 
-instance (Comonad w, Distributive w) => Comonad (Compose w w) where
+instance (Comonad w2, Comonad w1, Distributive w1) => Comonad (Compose w2 w1) where
     extract = extract . extract . getCompose
     duplicate = fmap Compose . Compose .
                 fmap distribute . duplicate . fmap duplicate .
