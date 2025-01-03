@@ -30,7 +30,9 @@ instance Corecursive (Stream a) where
 -- Stream is distributive over any functor
 instance Distributive Stream where
     distribute :: Functor f => f (Stream a) -> Stream (f a)
-    distribute stms = (headS <$> stms) :> distribute (tailS <$> stms)
+    -- distribute stms = (headS <$> stms) :> distribute (tailS <$> stms)
+    -- or, using corecursion:
+    distribute = ana (\fStms -> P (headS <$> fStms) (tailS <$> fStms))
 
 instance Show a => Show (Stream a) where
   show = unwords . fmap show . take 6 . toInfList
@@ -49,7 +51,6 @@ fromListS z = ana go
 
 toInfList :: Stream a -> [a]
 toInfList = cata (\(P a as) -> a : as)
-
 
 -- Bidirectional infinite stream
 -- Contains a backward and a forward stream
@@ -83,16 +84,16 @@ listToCur :: a -> [a] -> Cursor a
 listToCur z as = Cur (repeatS z) (fromListS z as)
 
 get2 :: Cursor a -> [a]
-get2 bidi = [extract (moveBwd bidi), extract (moveFwd bidi)]
+get2 cur = [extract (moveBwd cur), extract (moveFwd cur)]
 
 get3 :: Cursor a -> [a]
-get3 bidi = [extract (moveBwd bidi), extract bidi, extract (moveFwd bidi)]
+get3 cur = [extract (moveBwd cur), extract cur, extract (moveFwd cur)]
 
 
-data State = Empty | Full
+data Cell = Empty | Full
   deriving Enum
 
-instance Show State where
+instance Show Cell where
   show Empty = "."
   show Full  = "o"
 
@@ -119,29 +120,30 @@ get8neighbors (Compose grid) =
   get2 (extract grid) ++
   get3 (extract $ moveFwd grid)
 
-countNeighbors :: Grid State -> Int
+countNeighbors :: Grid Cell -> Int
 countNeighbors = sum . fmap fromEnum . get8neighbors
 
--- Calculate next state at the current location in the Grid
+-- Calculate next generation at the current location in the Grid
 
-nextState :: Grid State -> State
-nextState grid
+nextGen :: Grid Cell -> Cell
+nextGen grid
   | cnt == 3 = Full
   | cnt == 2 = extract grid
   | otherwise = Empty
   where
       cnt = countNeighbors grid
 
-generations :: Grid State -> [Grid State]
-generations = iterate $ extend nextState
+generations :: Grid Cell -> [Grid Cell]
+generations = iterate $ extend nextGen
 
-parseChar :: Char -> State
+parseChar :: Char -> Cell
 parseChar '.' = Empty
 parseChar 'o' = Full
 parseChar _ = error "Invalid grid input"
 
 main :: IO ()
 main = do
+  -- A glider pattern
   let matrix = fmap (fmap parseChar) [".o.", "..o", "ooo", "...", "..."]
       grid = matrixToGrid Empty matrix
   print $ take 9 (generations grid)
